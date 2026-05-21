@@ -1,0 +1,106 @@
+name: Criar Release por Tag (React Native)
+
+on:
+  push:
+    tags:
+      - 'v*' # Dispara automaticamente sempre que uma tag começando com "v" for enviada (v1.0, v2.1.3, etc)
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do Código
+        uses: actions/checkout@v4
+        with:
+          clean: true
+          fetch-depth: 0 # Coleta o histórico para gerar o changelog automático baseado na tag anterior
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Instalar Dependências do Projeto
+        run: npm install --legacy-peer-deps || npm install
+
+      - name: Configurar Java (Ambiente Android)
+        uses: actions/setup-java@v4
+        with:
+          distribution: "zulu"
+          java-version: "17"
+
+      # Verifica se existe o projeto Android real, senão simula um APK para testarmos no repositório pessoal
+      - name: Build Android Release (Simulado ou Real)
+        run: |
+          if [ -d "android" ]; then
+            echo "===== Pasta Android encontrada! Iniciando build real ====="
+            cd android
+            chmod +x gradlew
+            ./gradlew assembleRelease
+          else
+            echo "===== Projeto sem pasta Android. Criando APK simulado para teste ====="
+            mkdir -p android/app/build/outputs/apk/release
+            echo "Conteudo simulado do instalador" > android/app/build/outputs/apk/release/app-release.apk
+          fi
+
+      - name: Criar GitHub Release e Anexar APK (API Nativa)
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            // Captura o nome exato da tag que disparou o evento (Ex: refs/tags/v1.0.0 -> v1.0.0)
+            const tagName = context.ref.replace('refs/tags/', '');
+            console.log(`Iniciando criação da Release para a tag: ${tagName}`);
+            
+            // 1. Cria a estrutura da Release no GitHub usando o nome da tag enviada
+            const release = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tagName,
+              name: `Release ${tagName}`,
+              body: `## Atualização Mobile - ${tagName}\n- **Tag disparada:** \`${tagName}\`\n- **Autor do Push:** @${context.actor}\n\n*O changelog completo de commits foi anexado abaixo automaticamente.*`,
+              draft: false,
+              prerelease: false,
+              generate_release_notes: true // Varre a diferença entre essa tag e a anterior para montar o changelog
+            });
+
+            // 2. Localiza o APK no caminho padrão de compilação
+            const nomeArquivo = 'app-release.apk';
+            const caminhoArquivo = path.join(
+              process.env.GITHUB_WORKSPACE, 
+              'android/app/build/outputs/apk/release', 
+              nomeArquivo
+            );
+            
+            // 3. Faz o upload do arquivo executável para os Assets da Release
+            if (fs.existsSync(caminhoArquivo)) {
+              console.log(`Encontrado instalador em: ${caminhoArquivo}`);
+              const fileBuffer = fs.readFileSync(caminhoArquivo);
+              
+              await github.rest.repos.uploadReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release.data.id,
+                name: nomeArquivo,
+                data: fileBuffer,
+                headers: {
+                  'content-type': 'application/vnd.android.package-archive',
+                  'content-length': fileBuffer.length
+                }
+              });
+              console.log('Upload do APK concluído com sucesso!');
+            } else {
+              throw new Error(`Arquivo APK não localizado em: ${caminhoArquivo}`);
+            }
+
+# como testar localmente:
+# git tag v1.0.0
+# git push origin v1.0.0

@@ -1,0 +1,98 @@
+name: Criar Release Automática (React Native)
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - closed # Dispara apenas quando o PR fechar
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    # Garante que o pipeline só rode se o PR foi realmente integrado (Merged) e não apenas cancelado/fechado
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest # Runners hospedados pelo GitHub (Linux) funcionam melhor para mobile
+
+    steps:
+      - name: Checkout do Código
+        uses: actions/checkout@v4
+        with:
+          clean: true
+          fetch-depth: 0 # Essencial para gerar o changelog automático corretamente
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Instalar Dependências do Projeto
+        run: npm install
+
+      - name: Configurar Java (Necessário para Android)
+        uses: actions/setup-java@v4
+        with:
+          distribution: "zulu"
+          java-version: "17"
+
+      # EXEMPLO ANDROID: Compila o projeto gerando o arquivo APK de Produção
+      - name: Build Android Release (APK)
+        working-directory: ./android
+        run: ./gradlew assembleRelease
+
+      - name: Criar GitHub Release e Anexar APK (API Nativa)
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            // Gera tag automática baseada na data e hora do Merge
+            const dataHora = new Date().toISOString().replace(/[:.]/g, '-');
+            const tagName = `app-release-${dataHora}`;
+            
+            // 1. Cria a estrutura da Release no GitHub
+            const release = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tagName,
+              target_commitish: 'main',
+              name: `Release Automática - PR #${context.payload.pull_request.number}`,
+              body: `## Detalhes da Atualização Mobile\n- **PR Integrado:** #${context.payload.pull_request.number}\n- **Título:** ${context.payload.pull_request.title}\n- **Autor:** @${context.actor}`,
+              draft: false,
+              prerelease: false,
+              generate_release_notes: true // Gera a lista de commits automaticamente
+            });
+
+            // 2. Define o caminho padrão onde o Gradle gera o APK compilado
+            const nomeArquivo = 'app-release.apk';
+            const caminhoArquivo = path.join(
+              process.env.GITHUB_WORKSPACE, 
+              'android/app/build/outputs/apk/release', 
+              nomeArquivo
+            );
+            
+            // 3. Faz o upload do instalador (.apk) para os Assets da Release
+            if (fs.existsSync(caminhoArquivo)) {
+              console.log(`Encontrado instalador em: ${caminhoArquivo}`);
+              const fileBuffer = fs.readFileSync(caminhoArquivo);
+              
+              await github.rest.repos.uploadReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release.data.id,
+                name: nomeArquivo,
+                data: fileBuffer,
+                headers: {
+                  'content-type': 'application/vnd.android.package-archive',
+                  'content-length': fileBuffer.length
+                }
+              });
+              console.log('Upload do APK de produção concluído com sucesso!');
+            } else {
+              throw new Error(`Arquivo APK não localizado em: ${caminhoArquivo}`);
+            }
