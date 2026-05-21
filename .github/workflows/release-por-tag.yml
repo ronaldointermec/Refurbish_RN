@@ -28,7 +28,11 @@ jobs:
       - name: Instalar Dependências do Projeto
         run: |
           npm cache clean --force
+          # Instala primeiro as dependências normais do seu projeto
           npm install --legacy-peer-deps
+          # CORREÇÃO: Força a injeção do pacote base ausente exigido pelo React Native Elements
+          npm install @rneui/base --legacy-peer-deps
+
 
       - name: Configurar Java (Ambiente Android)
         uses: actions/setup-java@v4
